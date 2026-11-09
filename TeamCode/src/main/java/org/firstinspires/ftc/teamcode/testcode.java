@@ -316,6 +316,7 @@ public class testcode extends OpMode {
         // ---- Launcher ----
         launcher = hardwareMap.get(DcMotorEx.class, LAUNCHER_NAME);
         launcher.setDirection(DcMotorSimple.Direction.FORWARD);
+        //launcher.setDirection(DcMotorSimple.Direction.REVERSE);
         // FLOAT so the flywheel coasts down. Commanding velocity 0 would make the velocity PID drive
         // the flywheel in reverse to stop it - a big current spike every time you release the button.
         launcher.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.FLOAT);
@@ -498,54 +499,87 @@ public class testcode extends OpMode {
     //  DRIVE (TANK)
     // =========================================================================================
     private void updateDrive(double now, double dt) {
-        // FTC sticks report "up" as negative, so invert: forward == +1 on both sticks.
+
+        // LEFT STICK Y: Forward and backward
+        // FTC reports stick-up as negative, so we invert it.
         leftStickIn = -gamepad1.left_stick_y;
-        rightStickIn = -gamepad1.right_stick_y;
 
-        double left = shapeStick(leftStickIn);
-        double right = shapeStick(rightStickIn);
+        // RIGHT STICK X: Turn left and right in place
+        rightStickIn = gamepad1.right_stick_x;
 
-        // Stick-sync assist: if both sticks are pushed the same way and nearly equal, drive dead straight.
-        straightAssistActive = STRAIGHT_ASSIST_ENABLED
-                && left != 0.0 && right != 0.0
-                && Math.signum(left) == Math.signum(right)
-                && Math.abs(left - right) <= STRAIGHT_ASSIST_WINDOW;
-        if (straightAssistActive) {
-            double average = 0.5 * (left + right);
-            left = average;
-            right = average;
-        }
+        // Convert joystick inputs into smooth motor values.
+        double drive = shapeStick(leftStickIn);
+        double steering = shapeStick(gamepad1.left_stick_x);
+        double pivot = shapeStick(rightStickIn);
 
-        // Flipped front: the driver's left stick now controls the physical RIGHT side (inverted), and vice versa.
+        // LEFT STICK X: Steer while the robot is moving.
+        // A six-wheel traction drivetrain cannot move sideways like mecanum wheels.
+        double turnWhileMoving = steering * Math.abs(drive);
+
+        // RIGHT STICK X: Allows turning even when the robot is stationary.
+        double turn = turnWhileMoving + pivot;
+
+        // B BUTTON: Reverse the robot's front direction.
         if (frontReversed) {
-            double newLeft = -right;
-            right = -left;
-            left = newLeft;
+            drive = -drive;
         }
 
-        // Over-current: any drive motor tripped -> hold a power cap for a while.
+        // Calculate left and right drivetrain motor powers.
+        double left = drive + turn;
+        double right = drive - turn;
+
+        // Keep motor power between -1 and 1.
+        double maxMagnitude = Math.max(
+                1.0,
+                Math.max(Math.abs(left), Math.abs(right))
+        );
+
+        left /= maxMagnitude;
+        right /= maxMagnitude;
+
+        // Straight assist is not used with this control layout.
+        straightAssistActive = false;
+
+        // Check whether any drivetrain motor has exceeded its current limit.
         for (CurrentChannel channel : driveChannels) {
             if (channel.tripped) {
                 driveDerateUntil = now + DRIVE_DERATE_HOLD_SECONDS;
             }
         }
+
         driveDerated = now < driveDerateUntil;
+
         if (driveDerated && !wasDriveDerated) {
             rumbleDrivers(500);
         }
+
         wasDriveDerated = driveDerated;
 
+        // Precision mode: A toggles it; left bumper activates it while held.
         precisionActive = precisionLatched || gamepad1.left_bumper;
-        driveScale = precisionActive ? PRECISION_SCALE : NORMAL_SCALE;
+
+        driveScale = precisionActive
+                ? PRECISION_SCALE
+                : NORMAL_SCALE;
+
         if (driveDerated) {
             driveScale = Math.min(driveScale, DRIVE_DERATE_SCALE);
         }
 
-        leftPower = leftSlew.update(clamp(left * driveScale, -1.0, 1.0), dt);
-        rightPower = rightSlew.update(clamp(right * driveScale, -1.0, 1.0), dt);
+        // Apply smooth acceleration and braking.
+        leftPower = leftSlew.update(
+                clamp(left * driveScale, -1.0, 1.0),
+                dt
+        );
+
+        rightPower = rightSlew.update(
+                clamp(right * driveScale, -1.0, 1.0),
+                dt
+        );
+
+        // Send the final power to the drivetrain motors.
         setDrive(leftPower, rightPower);
     }
-
     // =========================================================================================
     //  LAUNCHER + WINDMILL
     // =========================================================================================
@@ -615,7 +649,7 @@ public class testcode extends OpMode {
         launcherFeeding = wantFeed && (forceFeed || launcherReady);
 
         commandLauncher(wantSpin, launcherTargetVelocity);
-        setWindmill(launcherFeeding ? WINDMILL_FEED_POWER : 0.0);
+        setWindmill(launcherFeeding ? WINDMILL_FEED_POWER : 1.0);
     }
 
     private void commandLauncher(boolean spin, double targetTicksPerSecond) {
